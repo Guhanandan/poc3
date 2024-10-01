@@ -23,3 +23,8 @@ variable "app_port" {
   description = "The port for the application."
   type        = number
 }
+
+variable "private_key_path" {
+  description = " path to the private key"
+  type = string
+}

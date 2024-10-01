@@ -2,13 +2,13 @@
 - hosts: SonarQube
   vars:
     sonarqube_port: 9000
-    sonarqube_default_password: "admin"  # Default password after SonarQube installation
-    sonarqube_new_password: "admin123"  # New password for the admin user
-    sonarqube_admin_login: "admin"  # Username for SonarQube admin
+    sonarqube_default_password: "admin" 
+    sonarqube_new_password: "admin123"  
+    sonarqube_admin_login: "admin"
     sonarqube_project_key: "poc4"
     sonarqube_project_name: "poc4"
     sonarqube_token_name: "poc4"
-    quality_gate_name: "Sonar way"  # Name of the quality gate
+    quality_gate_name: "Sonar way"  
 
   tasks:
     - name: Wait until SonarQube Container is reachable via TCP/IP

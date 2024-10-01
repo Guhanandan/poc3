@@ -13,8 +13,8 @@ packer {
 source "amazon-ebs" "ubuntu" {
   ami_name      = "custom-ami-new"
   instance_type = "t2.micro"
-  region        = "us-east-1"
-  source_ami = "ami-0e86e20dae9224db8"
+  region        = "ap-south-1"
+  source_ami = "ami-039ee4c58100a4af0"
   ssh_username = "ubuntu"
 }
 build {

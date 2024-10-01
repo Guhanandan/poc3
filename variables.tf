@@ -1,7 +1,7 @@
 variable "ami_id" {
   description = "The AMI ID for the EC2 instances."
   type        = string
-  default     = "ami-0605eea6c0becbdb3"
+  default     = "ami-039ee4c58100a4af0"
 }
 
 variable "jenkins_instance_type" {
@@ -19,7 +19,7 @@ variable "sonarqube_instance_type" {
 variable "key_name" {
   description = "The key pair name for SSH access."
   type        = string
-  default = "poc4"
+  default = "server"
 }
 
 variable "jenkins_app_port" {
@@ -32,4 +32,10 @@ variable "sonarqube_app_port" {
   description = "The port for SonarQube."
   type        = number
   default     = 9000
+}
+
+variable "private_key_path" {
+  description = " path to the private key"
+  type = string
+  default = "server.pem"
 }

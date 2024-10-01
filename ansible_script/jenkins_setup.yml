@@ -1,57 +1,190 @@
----
-- name: Configure Jenkins (unlock and create admin user)
-  hosts: Jenkins
-  become: yes
+- name: Setup Jenkins
+  hosts: all
+  become: true
   vars:
-    ansible_ssh_private_key_file: "/path/to/your-key.pem"  # Path to your .pem key
-    jenkins_admin_username: "admin"
-    jenkins_admin_password: "secure_password"  # Set your admin password
-    jenkins_admin_fullname: "Admin User"
-    jenkins_admin_email: "admin@example.com"
-    jenkins_plugins:
-      - git
-      - workflow-aggregator
-      - sonar
-      - sonar-quality-gates
+    jenkins_url: "http://localhost:8080"
+    jenkins_container: "jenkins_container"
+    username: "guha"
+    new_password: "1234"
+    fullname: "Guhanandan"
+    email: "hello@world.com"
+    job_name: "ansible-demo-job"
+    job_config_xml_path: "/tmp/job-config.xml"
+    sonar_scanner_name: "SonarQube_Scanner"
+    sonar_scanner_version: "latest"
+    jenkins_crumb_url: "{{ jenkins_url }}/crumbIssuer/api/xml?xpath=concat(//crumbRequestField,%22:%22,//crumb)"
   tasks:
-
-    - name: Retrieve Jenkins initial admin password
-      slurp:
-        src: /var/lib/jenkins/secrets/initialAdminPassword
-      register: jenkins_initial_password
-
-    - name: Decode and display Jenkins initial admin password
-      debug:
-        msg: "Jenkins initial admin password: {{ jenkins_initial_password.content | b64decode }}"
-
-    - name: Download Jenkins CLI
-      get_url:
-        url: "http://{{ inventory_hostname }}:8080/jnlpJars/jenkins-cli.jar"
-        dest: "/tmp/jenkins-cli.jar"
-
-    - name: Wait for Jenkins service to be available
+    - name: Pull Jenkins Docker image
+      docker_image:
+        name: jenkins/jenkins
+        source: pull
+    - name: Run Jenkins Docker container
+      docker_container:
+        name: jenkins_container
+        image: jenkins/jenkins
+        state: started
+        ports:
+          - "8080:8080"
+    - name: Wait until Jenkins is fully up and running
       uri:
-        url: "http://{{ inventory_hostname }}:8080/login"
+        url: "{{ jenkins_url }}/login"
+        return_content: no
         status_code: 200
-      register: result
+        timeout: 60
+      register: jenkins_status
+      until: jenkins_status.status == 200
       retries: 10
-      delay: 30
-      until: result.status == 200
-
-    - name: Create Jenkins admin user
+      delay: 10
+    - name: Get initial admin password from Jenkins
+      command: sudo docker exec {{ jenkins_container }} cat /var/jenkins_home/secrets/initialAdminPassword
+      register: initial_password_output
+    - name: Check if initial admin password is found
+      fail:
+        msg: "Initial admin password file not found!"
+      when: initial_password_output.stdout == ""
+    - name: Set password variable
+      set_fact:
+        password: "{{ initial_password_output.stdout }}"
+    - name: Create cookie jar
+      command: mktemp
+      register: cookie_jar
+    - name: Get Jenkins crumb
       shell: |
-        java -jar /tmp/jenkins-cli.jar -s http://{{ inventory_hostname }}:8080/ \
-        -auth admin:{{ jenkins_initial_password.content | b64decode }} groovy = \
-        'jenkins.model.Jenkins.instance.securityRealm.createAccount("{{ jenkins_admin_username }}", "{{ jenkins_admin_password }}")'
-
-    - name: Install Jenkins plugins
+        curl -u "admin:{{ password }}" --cookie-jar "{{ cookie_jar.stdout }}" "{{ jenkins_url }}/crumbIssuer/api/xml?xpath=concat(//crumbRequestField,%22:%22,//crumb)"
+      register: full_crumb_output
+    - name: Extract only crumb
+      set_fact:
+        only_crumb: "{{ full_crumb_output.stdout.split(':')[1] | trim }}"
+    - name: Create admin user
       shell: |
-        java -jar /tmp/jenkins-cli.jar -s http://{{ inventory_hostname }}:8080/ \
-        -auth {{ jenkins_admin_username }}:{{ jenkins_admin_password }} install-plugin {{ item }}
-      loop: "{{ jenkins_plugins }}"
-
-  handlers:
-    - name: Restart Jenkins
-      service:
-        name: jenkins
-        state: restarted
+        curl -X POST -u "admin:{{ password }}" "{{ jenkins_url }}/setupWizard/createAdminUser" \
+          -H "Connection: keep-alive" \
+          -H "Accept: application/json, text/javascript" \
+          -H "X-Requested-With: XMLHttpRequest" \
+          -H "{{ full_crumb_output.stdout }}" \
+          -H "Content-Type: application/x-www-form-urlencoded" \
+          --cookie "{{ cookie_jar.stdout }}" \
+          --data-raw "username={{ username }}&password1={{ new_password }}&password2={{ new_password }}&fullname={{ fullname }}&email={{ email }}&Jenkins-Crumb={{ only_crumb }}&json=%7B%22username%22%3A%20%22{{ username }}%22%2C%20%22password1%22%3A%20%22{{ new_password }}%22%2C%20%22password2%22%3A%20%22{{ new_password }}%22%2C%20%22fullname%22%3A%20%22{{ fullname }}%22%2C%20%22email%22%3A%20%22{{ email }}%22%2C%20%22Jenkins-Crumb%22%3A%20%22{{ only_crumb }}%22%7D"
+    - name: Install plugins
+      shell: |
+        full_crumb=$(curl -u "{{ username }}:{{ new_password }}" --cookie-jar "{{ cookie_jar.stdout }}" "{{ jenkins_url }}/crumbIssuer/api/xml?xpath=concat(//crumbRequestField,%22:%22,//crumb)")
+        only_crumb=$(echo "$full_crumb" | cut -d: -f2)
+        curl -X POST -u "{{ username }}:{{ new_password }}" "{{ jenkins_url }}/pluginManager/installPlugins" \
+          -H "Connection: keep-alive" \
+          -H "Accept: application/json, text/javascript, */*; q=0.01" \
+          -H "X-Requested-With: XMLHttpRequest" \
+          -H "$full_crumb" \
+          -H "Content-Type: application/json" \
+          --cookie "{{ cookie_jar.stdout }}" \
+          --data-raw '{"dynamicLoad":true,"plugins":["cloudbees-folder","antisamy-markup-formatter","build-timeout","credentials-binding","sonar","timestamper","ws-cleanup","ant","gradle","workflow-aggregator","github-branch-source","pipeline-github-lib","pipeline-stage-view","git","ssh-slaves","matrix-auth","pam-auth","ldap","email-ext","mailer"],"Jenkins-Crumb":"'$only_crumb'"}'
+    - name: Confirm Jenkins URL
+      shell: |
+        url_urlEncoded=$(python3 -c "import urllib.parse; print(urllib.parse.quote('{{ jenkins_url }}', safe=''))")
+        curl -X POST -u "{{ username }}:{{ new_password }}" "{{ jenkins_url }}/setupWizard/configureInstance" \
+          -H "Connection: keep-alive" \
+          -H "Accept: application/json, text/javascript, */*; q=0.01" \
+          -H "X-Requested-With: XMLHttpRequest" \
+          -H "$full_crumb" \
+          -H "Content-Type: application/x-www-form-urlencoded" \
+          --cookie "{{ cookie_jar.stdout }}" \
+          --data-raw "rootUrl=$url_urlEncoded%2F&Jenkins-Crumb={{ only_crumb }}&json=%7B%22rootUrl%22%3A%20%22$url_urlEncoded%2F%22%2C%20%22Jenkins-Crumb%22%3A%20%22{{ only_crumb }}%22%7D"
+    - name: Complete Jenkins setup
+      debug:
+        msg: "Jenkins setup complete!"
+    - name: Generate API token for the user
+      shell: |
+        full_crumb=$(curl -u "{{ username }}:{{ new_password }}" --cookie-jar "{{ cookie_jar.stdout }}" "{{ jenkins_url }}/crumbIssuer/api/xml?xpath=concat(//crumbRequestField,%22:%22,//crumb)")
+        only_crumb=$(echo "$full_crumb" | cut -d: -f2)
+        curl -X POST -u "{{ username }}:{{ new_password }}" "{{ jenkins_url }}/me/descriptorByName/jenkins.security.ApiTokenProperty/generateNewToken" \
+          -H "Connection: keep-alive" \
+          -H "Accept: application/json, text/javascript, */*; q=0.01" \
+          -H "X-Requested-With: XMLHttpRequest" \
+          -H "$full_crumb" \
+          -H "Content-Type: application/x-www-form-urlencoded" \
+          --cookie "{{ cookie_jar.stdout }}" \
+          --data-raw 'newTokenName=ansible-token'
+      register: api_token_output
+    - name: Debug raw API token output
+      debug:
+        var: api_token_output
+    - name: Extract API token
+      set_fact:
+        api_token: "{{ api_token_output.stdout | from_json | json_query('data.tokenValue') }}"
+    - name: Display the generated API token
+      debug:
+        msg: "Generated API token: {{ api_token }}"
+    - name: Create job config XML
+      copy:
+        content: |
+          <?xml version='1.0' encoding='UTF-8'?>
+          <project>
+            <actions/>
+            <description>An Ansible-created Jenkins job</description>
+            <keepDependencies>false</keepDependencies>
+            <properties/>
+            <scm class="hudson.scm.NullSCM"/>
+            <builders>
+              <hudson.tasks.Shell>
+                <command>echo "Building the job!"</command>
+              </hudson.tasks.Shell>
+            </builders>
+            <publishers/>
+            <buildWrappers/>
+          </project>
+        dest: "{{ job_config_xml_path }}"
+      register: create_xml
+    - name: Debug XML file creation
+      debug:
+        var: create_xml
+    - name: Create a Jenkins job via Shell
+      shell: |
+        curl -X POST -u "{{ username }}:{{ api_token }}" "{{ jenkins_url }}/createItem?name={{ job_name }}" \
+        --header "Content-Type: application/xml" \
+        --data-binary "@{{ job_config_xml_path }}"
+      register: create_job_response
+    - name: Debug job creation response
+      debug:
+        var: create_job_response
+    - name: Trigger the Jenkins job build via Shell
+      shell: |
+        curl -X POST -u "{{ username }}:{{ api_token }}" "{{ jenkins_url }}/job/{{ job_name }}/build"
+      register: build_job_response
+    - name: Debug job build response
+      debug:
+        var: build_job_response
+    - name: Verify job creation via Shell
+      shell: |
+        curl -u "{{ username }}:{{ api_token }}" "{{ jenkins_url }}/job/{{ job_name }}/api/json"
+      register: verify_job_response
+    - name: Display job details
+      debug:
+        msg: "Job {{ job_name }} details: {{ verify_job_response.stdout }}"
+    - name: Configure SonarQube Scanner in Jenkins tools
+      shell: |
+        full_crumb=$(curl -u "{{ username }}:{{ api_token }}" --cookie-jar "{{ cookie_jar }}" "{{ jenkins_crumb_url }}")
+        only_crumb=$(echo "$full_crumb" | cut -d: -f2)
+        curl -X POST -u "{{ username }}:{{ api_token }}" "{{ jenkins_url }}/descriptorByName/hudson.plugins.sonar.SonarRunnerInstallation/configure" \
+        -H "Connection: keep-alive" \
+        -H "Accept: application/json, text/javascript" \
+        -H "X-Requested-With: XMLHttpRequest" \
+        -H "$full_crumb" \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        --cookie "{{ cookie_jar }}" \
+        --data-raw "name={{ sonar_scanner_name }}&home=&propertiesFile=&installers=[{\"id\":\"hudson.tools.InstallSourceProperty\",\"installers\":[{\"id\":\"hudson.plugins.sonar.SonarRunnerInstaller\",\"properties\":[{\"id\":\"toolInstallVersionSelector\",\"value\":\"{{ sonar_scanner_version }}\"}]}]}]&Jenkins-Crumb=$only_crumb"
+      register: configure_sonar_scanner
+    - name: Apply Jenkins Configuration (Simulate 'Save' and 'Apply')
+      shell: |
+        full_crumb=$(curl -u "{{ username }}:{{ api_token }}" --cookie-jar "{{ cookie_jar }}" "{{ jenkins_crumb_url }}")
+        only_crumb=$(echo "$full_crumb" | cut -d: -f2)
+        curl -X POST -u "{{ username }}:{{ api_token }}" "{{ jenkins_url }}/configSubmit" \
+        -H "Connection: keep-alive" \
+        -H "Accept: application/json, text/javascript, */*; q=0.01" \
+        -H "X-Requested-With: XMLHttpRequest" \
+        -H "$full_crumb" \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        --cookie "{{ cookie_jar }}" \
+        --data-raw "Jenkins-Crumb=$only_crumb"
+      register: apply_configuration
+    - name: Display Configuration Result
+      debug:
+        var: apply_configuration

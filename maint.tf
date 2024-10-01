@@ -8,17 +8,18 @@ terraform {
 }
 
 provider "aws" {
-  region = "us-east-1"  # Change this to your preferred region
+  region = "ap-south-1"  # Change this to your preferred region
 }
 
 # Create EC2 for Jenkins
 module "jenkins_ec2" {
-  source        = "./ec2"
+  source        = "./jenkins"
   ami_id        = var.ami_id
   instance_type = var.jenkins_instance_type
   key_name      = var.key_name
   instance_name = "Jenkins"
   app_port      = var.jenkins_app_port
+  private_key_path = var.private_key_path
 }
 
 # Create EC2 for SonarQube
